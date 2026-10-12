@@ -1,0 +1,4 @@
+/.strata-full/
+__pycache__/
+*.pyc
+*.log

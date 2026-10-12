@@ -43,6 +43,12 @@ THEME = {
 }
 
 
+def _web_url(port: int) -> str:
+    # localhost is a separate browser origin from 127.0.0.1, which can still
+    # have another chat app's old service worker registered on this port.
+    return f"http://localhost:{port}/"
+
+
 def _reserve_gib(value: str, label: str, maximum: float) -> float:
     try:
         number = float(value.strip().replace(",", "."))
@@ -233,6 +239,7 @@ class StrataControl(tk.Tk):
         self.config_data: dict = {}
         self.display_to_path: dict[str, Path] = {}
         self._busy = False
+        self._pending_browser_port: int | None = None
 
         self._make_variables()
         self._build_ui()
@@ -527,7 +534,7 @@ class StrataControl(tk.Tk):
             self.environment_vars.insert(
                 "1.0", "\n".join(f"{name}={value}" for name, value in env_vars.items())
             )
-            self.address_label.configure(text=f"http://127.0.0.1:{data.get('port', 8080)}")
+            self.address_label.configure(text=_web_url(int(data.get('port', 8080))))
         except (OSError, ValueError, TypeError) as exc:
             messagebox.showerror("Не удалось прочитать конфигурацию", str(exc), parent=self)
 
@@ -682,7 +689,7 @@ class StrataControl(tk.Tk):
             temp.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
             os.replace(temp, path)
             self.config_data = data
-            self.address_label.configure(text=f"http://127.0.0.1:{data['port']}")
+            self.address_label.configure(text=_web_url(data['port']))
             self.status_var.set("Настройки сохранены. Для применения перезапустите сервер.")
             if not silent:
                 messagebox.showinfo("Strata", "Настройки сохранены.", parent=self)
@@ -725,6 +732,10 @@ class StrataControl(tk.Tk):
             else:
                 text, color = "●  Strata работает на этом порту", THEME["accent"]
             self.web_button.configure(state="normal")
+            if matches and self._pending_browser_port == port:
+                self._pending_browser_port = None
+                if self.config_data.get("open_browser") is not False:
+                    webbrowser.open(_web_url(port))
         elif matches:
             text, color = "●  Запускается — модель загружается", THEME["warning"]
             self.web_button.configure(state="disabled")
@@ -780,7 +791,7 @@ class StrataControl(tk.Tk):
                 process_env.update({str(name): str(value) for name, value in data.get("launcher_env", {}).items()})
                 server_proc = subprocess.Popen(
                     [str(PYTHON), str(SERVER), "--engine", "strata", "--config", str(self.config_path),
-                     "--port", str(data.get("port", 8080)), "--open"],
+                     "--port", str(data.get("port", 8080))],
                     cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                     creationflags=flags, close_fds=True, env=process_env,
                 )
@@ -800,6 +811,7 @@ class StrataControl(tk.Tk):
                         except psutil.NoSuchProcess:
                             pass
                         raise OSError("Не удалось включить защиту RAM. Сервер остановлен.")
+            self._pending_browser_port = int(data.get("port", 8080))
             self.status_var.set("Запускаю Strata…")
         except OSError as exc:
             messagebox.showerror("Не удалось запустить Strata", str(exc), parent=self)
@@ -858,11 +870,15 @@ class StrataControl(tk.Tk):
 
     def _open_web(self) -> None:
         port = self._selected_port()
+        if self.config_path is not None:
+            matches = _server_processes(self.config_path)
+            if matches:
+                port = _port_in_command(matches[0], port)
         health = _health(port)
         if not health or health.get("service") != "strata":
             messagebox.showinfo("Strata", "Веб-интерфейс станет доступен после загрузки модели.", parent=self)
             return
-        webbrowser.open(f"http://127.0.0.1:{port}/")
+        webbrowser.open(_web_url(port))
 
     def _open_log(self) -> None:
         if not LOG_PATH.exists():
