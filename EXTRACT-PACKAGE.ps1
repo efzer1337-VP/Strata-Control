@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$taskArchive = Join-Path $PSScriptRoot 'downloads\Strata-Control-Full-20261012.zip'
+$taskArchive = Join-Path $PSScriptRoot 'downloads\Strata-Control-Full-20261012-v2.zip'
 $taskDestination = Join-Path $PSScriptRoot '.strata-full'
 $taskMarker = Join-Path $taskDestination '.package-sha256'
 if (-not [IO.File]::Exists($taskArchive)) { throw 'Full package is missing. Download the complete repository or the full release ZIP.' }

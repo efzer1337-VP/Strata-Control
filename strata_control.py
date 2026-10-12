@@ -7,6 +7,7 @@ import hashlib
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -16,6 +17,7 @@ import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from strata_model_catalog import catalog_rows, describe_file, first_shard
 
 try:
     import psutil
@@ -29,18 +31,98 @@ PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 LOG_PATH = Path(os.environ.get("LOCALAPPDATA", str(ROOT))) / "Strata" / "strata-control.log"
 VALUE_OPTIONS = {
     "--max-context", "--kv", "--kv-resident", "--spec", "--spec-min-p",
-    "--expert-cache", "--vram-reserve-mib", "--resident-budget-gib",
+    "--expert-cache", "--vram-reserve-mib", "--resident-budget-gib", "--mtp",
 }
 FLAG_OPTIONS = {"--resident-experts", "--vision"}
 MANAGED_OPTIONS = VALUE_OPTIONS | FLAG_OPTIONS
 BLOCKED_EXTRA_OPTIONS = {"--host", "--api-key", "--port", "--config", "--engine", "--open"}
 GIB = 1024 ** 3
 THEME = {
-    "background": "#0d1815", "surface": "#15251f", "input": "#101d17",
-    "border": "#30443a", "text": "#e2eee4", "muted": "#a5bbad",
-    "accent": "#a5dfb5", "button": "#244f36", "hover": "#326e49",
+    "background": "#0a0a0a", "surface": "#171717", "input": "#101010",
+    "border": "#262626", "text": "#fafafa", "muted": "#a1a1a1",
+    "accent": "#fafafa", "button": "#262626", "hover": "#464646",
     "warning": "#e8c382", "danger": "#efaaa1",
 }
+CONTROL_STATE = ROOT / ".strata-control-state.json"
+
+
+def _prepare_local_model(source: Path, template: Path | None, destination: Path) -> None:
+    """Prepare only local files; this route never invokes setup's download steps."""
+    import setup as installer
+    details = describe_file(source.name)
+    if not details or not details.get("menu"):
+        raise ValueError("Эта модель не поддерживается Strata. Выберите Qwen3.8, Coder, Swift 1.5 или поддерживаемый Unsloth GGUF.")
+    family, quant = details["family"], details["quant"]
+    fam = installer.FAMILIES[family]
+    shards = installer.gguf_dir_shards(source.parent, fam, quant)
+    if _normalized(shards[0]) != _normalized(source):
+        raise ValueError("Выберите первую часть модели: 00001-of-….gguf.")
+    problem = installer.gguf_dir_problem(source.parent, source, fam, quant)
+    if problem:
+        raise ValueError("\n".join(problem))
+    installer.check_shards(shards)
+    from gguf_reader import GGUFFile
+    ple = next((shard for shard in shards if any(t.name == "per_layer_token_embd.weight" for t in GGUFFile(shard).tensors)), None)
+    if ple is None:
+        raise ValueError("В модели нет таблицы per_layer_token_embd: этот GGUF не совместим со Strata.")
+    old = json.loads(template.read_text(encoding="utf-8-sig")) if template else {}
+    total_ram = psutil.virtual_memory().total / GIB
+    reserve = min(8, total_ram / 4)
+    data = {key: old[key] for key in ("lib_dirs", "gpu", "gpus_asked", "port", "open_browser") if key in old}
+    data.setdefault("port", 8080)
+    data.setdefault("gpu", 0)
+    # New models do not inherit another family's context, steering or expert layout.
+    data["args"] = ["--max-context", "32768", "--kv", "int8", "--expert-cache", "auto", "--spec", "4", "--spec-min-p", "0.5", "--prefill", "auto", "--vram-reserve-mib", "2048", "--resident-budget-gib", f"{max(1, total_ram - reserve):.6f}"]
+    data["launcher_memory"] = {"ram_reserve_gib": reserve}
+    data["launcher_env"] = {"STRATA_RESIDENT_HEADROOM_GIB": f"{reserve:g}"}
+    key = hashlib.sha256(_normalized(source).encode()).hexdigest()[:16]
+    pack = ROOT.parent / "Strata-data" / "packs" / ("control-" + key)
+    mtp = _option_value(old.get("args", []), "--mtp")
+    if not mtp or not (Path(mtp) / "experts.bin").is_file():
+        local_mtp = ROOT.parent / "Strata-data" / "mtp" / "rt"
+        mtp = str(local_mtp) if (local_mtp / "experts.bin").is_file() else ""
+    print("Подготовка локальной модели. Файлы из интернета не скачиваются.", flush=True)
+    print(f"Папка подготовки: {pack}", flush=True)
+    command = [str(PYTHON), str(ROOT / "tools" / "iq_pack.py"), "--gguf", str(source), "--out", str(pack), *fam.get("pack_args", [])]
+    # Resident mode needs the contiguous expert file, as in official setup.
+    if not installer.MODELS[quant].get("budget") and (_has_flag(data.get("args", []), "--resident-experts") or _option_value(data.get("args", []), "--resident-budget-gib")):
+        if not (pack / "experts.bin").exists():
+            needed = installer.MODELS[quant]["arena_gb"] * 1e9 + 3 * GIB
+            if shutil.disk_usage(ROOT.parent).free < needed:
+                raise ValueError(f"Недостаточно места для подготовки: нужно примерно {needed / GIB:.0f} ГБ на диске {ROOT.anchor}.")
+        command.append("--experts-bin")
+    subprocess.run(command, check=True, cwd=str(ROOT), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    removed = {"--pack", "--native", "--ple-gguf", "--expert-profile", "--vision"}
+    args = _without_options(data.get("args", []), removed)
+    args += ["--pack", str(pack), "--native", str(source), "--expert-profile", str(ROOT / "data" / fam.get("profile", "expert-profile.bin"))]
+    if len(shards) <= 2:
+        args += ["--ple-gguf", str(ple)]
+    if installer.MODELS[quant].get("budget"):
+        args = _without_options(args, {"--resident-experts", "--resident-budget-gib"})
+        reserve = float(data.get("launcher_memory", {}).get("ram_reserve_gib", 0))
+        total = psutil.virtual_memory().total / GIB
+        budget = min(total - reserve, installer.resident_budget_gib(quant, total))
+        args += ["--resident-budget-gib", str(budget)]
+    args = _without_options(args, {"--mtp"}) + (["--mtp", mtp] if mtp else [])
+    data.update(args=args, exe=str(ROOT / "engine" / "strata.exe"), cwd=str(ROOT),
+                tokenizer=str(pack / "tokenizer"), model_name=source.stem,
+                log=str(destination.with_suffix(".log")))
+    data.pop("vision", None)  # The user selects a matching mmproj explicitly.
+    data["launcher_model"] = {"family": family, "quant": quant}
+    mmproj = next((p for p in (source.parent / fam["mmproj"], source.parent.parent / fam["mmproj"]) if p.is_file()), None)
+    if mmproj:
+        data["launcher_mmproj"] = str(mmproj)  # Suggest it without enabling vision.
+    if not template:
+        build = ROOT / "engine" / "BUILD.json"
+        if build.exists():
+            metadata = json.loads(build.read_text(encoding="utf-8-sig"))
+            data["lib_dirs"] = metadata.get("lib_dirs") or metadata.get("cuda_dirs") or []
+    if destination.exists():
+        raise ValueError("Профиль уже существует. Выберите его в списке моделей.")
+    temp = destination.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(temp, destination)
+    print("Готово. Модель добавлена; сервер можно запустить кнопкой «Запустить».", flush=True)
 
 
 def _web_url(port: int) -> str:
@@ -240,6 +322,8 @@ class StrataControl(tk.Tk):
         self.display_to_path: dict[str, Path] = {}
         self._busy = False
         self._pending_browser_port: int | None = None
+        self._started_process = None
+        self._prepare_process = None
 
         self._make_variables()
         self._build_ui()
@@ -256,6 +340,15 @@ class StrataControl(tk.Tk):
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(window, 20, ctypes.byref(dark), ctypes.sizeof(dark))
             except (OSError, AttributeError):
                 pass
+
+    def report_callback_exception(self, exc_type, exc_value, traceback_object) -> None:
+        import traceback
+        detail = "".join(traceback.format_exception(exc_type, exc_value, traceback_object))
+        try:
+            (ROOT / ".strata-control-startup.log").write_text(detail, encoding="utf-8")
+        except OSError:
+            pass
+        messagebox.showerror("Strata Control", f"{exc_value}\n\nПодробности сохранены в .strata-control-startup.log", parent=self)
 
     def _apply_theme(self) -> None:
         c = THEME
@@ -281,8 +374,8 @@ class StrataControl(tk.Tk):
         style.map("TCombobox", fieldbackground=[("readonly", c["input"])], foreground=[("readonly", c["text"])], selectbackground=[("readonly", c["input"])], selectforeground=[("readonly", c["text"])])
         style.configure("TButton", background=c["surface"], foreground=c["text"], bordercolor=c["border"], padding=(14, 10), relief="flat")
         style.map("TButton", background=[("active", c["button"])], foreground=[("disabled", "#6a8574")])
-        style.configure("Primary.TButton", background=c["button"], foreground=c["accent"], font=("Segoe UI", 10, "bold"))
-        style.map("Primary.TButton", background=[("active", c["hover"])])
+        style.configure("Primary.TButton", background="#e5e5e5", foreground="#0a0a0a", font=("Segoe UI", 10, "bold"))
+        style.map("Primary.TButton", background=[("disabled", c["surface"]), ("active", "#fafafa")], foreground=[("disabled", "#737373"), ("active", "#0a0a0a")])
         style.configure("Stop.TButton", foreground=c["danger"])
         style.configure("TCheckbutton", background=c["background"], foreground=c["text"], indicatorbackground=c["input"], indicatorforeground=c["accent"], padding=4)
         style.map("TCheckbutton", background=[("active", c["background"])], indicatorbackground=[("selected", c["button"])])
@@ -290,6 +383,9 @@ class StrataControl(tk.Tk):
         style.configure("TNotebook.Tab", background=c["background"], foreground=c["muted"], padding=(18, 10))
         style.map("TNotebook.Tab", background=[("selected", c["surface"]), ("active", c["surface"])], foreground=[("selected", c["accent"])])
         style.configure("Vertical.TScrollbar", background=c["surface"], troughcolor=c["input"], arrowcolor=c["muted"], bordercolor=c["border"])
+        style.configure("Treeview", background=c["input"], fieldbackground=c["input"], foreground=c["text"], rowheight=28, bordercolor=c["border"])
+        style.configure("Treeview.Heading", background=c["surface"], foreground=c["text"], padding=8)
+        style.map("Treeview", background=[("selected", c["hover"])], foreground=[("selected", c["text"])])
 
     def _make_variables(self) -> None:
         self.model_var = tk.StringVar()
@@ -308,6 +404,10 @@ class StrataControl(tk.Tk):
         self.vision_tokens_var = tk.StringVar()
         self.vram_reserve_var = tk.StringVar()
         self.ram_reserve_var = tk.StringVar()
+        self.mtp_var = tk.StringVar()
+        self.mtp_enabled_var = tk.BooleanVar()
+        self.model_info_var = tk.StringVar()
+        self.lazy_var = tk.BooleanVar()
 
     def _build_ui(self) -> None:
         self._apply_theme()
@@ -320,7 +420,7 @@ class StrataControl(tk.Tk):
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text="Strata", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(header, text="Управление локальной моделью", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 4))
-        ttk.Label(header, text="EVERGREEN", foreground=THEME["accent"], font=("Segoe UI", 9, "bold")).grid(row=0, column=1, sticky="e")
+        ttk.Label(header, text="LOCAL / CONTROL", foreground=THEME["muted"], font=("Cascadia Mono", 9)).grid(row=0, column=1, sticky="e")
 
         model_box = ttk.LabelFrame(outer, text="Модель", padding=10)
         model_box.grid(row=1, column=0, sticky="ew", pady=(12, 8))
@@ -329,6 +429,11 @@ class StrataControl(tk.Tk):
         self.model_combo = ttk.Combobox(model_box, textvariable=self.model_var, state="readonly")
         self.model_combo.grid(row=0, column=1, sticky="ew")
         self.model_combo.bind("<<ComboboxSelected>>", self._on_model_selected)
+        self.add_model_button = ttk.Button(model_box, text="+ Добавить модель", command=self._add_model)
+        self.add_model_button.grid(row=0, column=2, padx=(8, 0))
+        self.model_path_label = ttk.Label(model_box, text="", style="Muted.TLabel", wraplength=780)
+        self.model_path_label.grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Label(model_box, textvariable=self.model_info_var, style="Muted.TLabel", wraplength=820).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         status_box = ttk.LabelFrame(outer, text="Сервер", padding=10)
         status_box.grid(row=2, column=0, sticky="ew", pady=8)
@@ -347,6 +452,22 @@ class StrataControl(tk.Tk):
         notebook.add(memory_page, text="Память ПК")
         notebook.add(settings_page, text="Модель и vision")
         notebook.add(advanced_page, text="Дополнительно")
+        catalog_page = ttk.Frame(notebook, padding=14)
+        notebook.add(catalog_page, text="Какие модели выбрать")
+        self._build_catalog(catalog_page)
+
+        memory_page.columnconfigure(0, weight=1)
+        memory_page.rowconfigure(0, weight=1)
+        memory_canvas = tk.Canvas(memory_page, background=THEME["background"], highlightthickness=0)
+        memory_canvas.grid(row=0, column=0, sticky="nsew")
+        memory_scroll = ttk.Scrollbar(memory_page, orient="vertical", command=memory_canvas.yview)
+        memory_scroll.grid(row=0, column=1, sticky="ns")
+        memory_canvas.configure(yscrollcommand=memory_scroll.set)
+        memory_content = ttk.Frame(memory_canvas)
+        memory_window = memory_canvas.create_window((0, 0), window=memory_content, anchor="nw")
+        memory_content.bind("<Configure>", lambda _event: memory_canvas.configure(scrollregion=memory_canvas.bbox("all")))
+        memory_canvas.bind("<Configure>", lambda event: memory_canvas.itemconfigure(memory_window, width=event.width))
+        memory_page = memory_content
 
         memory_page.columnconfigure(0, weight=1)
         memory_page.columnconfigure(1, weight=1)
@@ -364,6 +485,7 @@ class StrataControl(tk.Tk):
         self.memory_summary.grid(row=2, column=0, columnspan=2, sticky="w", pady=(20, 12))
         ttk.Label(memory_page, text="Резерв RAM уменьшает кэш экспертов; остальные эксперты читаются с диска. Если свободной RAM меньше заданного запаса три проверки подряд, защита остановит сервер. Она продолжит работать после закрытия этого окна.", style="Muted.TLabel", wraplength=780).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 12))
         ttk.Label(memory_page, text="1 ГБ здесь = 1024 МиБ. Резерв VRAM — цель при запуске, а не запрет другим приложениям занимать память.", style="Muted.TLabel", wraplength=780).grid(row=4, column=0, columnspan=2, sticky="w")
+        ttk.Button(memory_page, text="Настройки с запасом · 32K контекст", command=self._apply_memory_preset).grid(row=5, column=0, columnspan=2, sticky="w", pady=12)
 
         settings_page.columnconfigure(0, weight=1)
         settings_page.rowconfigure(0, weight=1)
@@ -382,7 +504,8 @@ class StrataControl(tk.Tk):
         for col in (1, 3):
             settings.columnconfigure(col, weight=1)
 
-        self._entry(settings, 0, 0, "Контекст (токены)", self.context_var)
+        ttk.Label(settings, text="Контекст (токены)").grid(row=0, column=0, sticky="w", padx=6)
+        ttk.Combobox(settings, textvariable=self.context_var, values=(8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288), width=14).grid(row=0, column=1, sticky="ew", padx=6, pady=4)
         self._combo(settings, 0, 2, "KV cache", self.kv_var, ("int8", "q4_0", "k8v4"))
         self._entry(settings, 1, 0, "KV в VRAM (токены; 0 — выкл.)", self.kv_resident_var)
         self._entry(settings, 1, 2, "Порт", self.port_var)
@@ -403,6 +526,14 @@ class StrataControl(tk.Tk):
         self.mmproj_entry.grid(row=5, column=1, columnspan=2, sticky="ew", padx=6, pady=4)
         ttk.Button(settings, text="Обзор…", command=self._browse_mmproj).grid(row=5, column=3, sticky="ew", padx=6, pady=4)
         self._entry(settings, 6, 0, "Лимит image tokens", self.vision_tokens_var)
+        ttk.Checkbutton(settings, text="MTP · черновики модели", variable=self.mtp_enabled_var).grid(row=7, column=0, columnspan=2, sticky="w", padx=6, pady=(12, 4))
+        ttk.Label(settings, text="Spec = 0 отключает спекуляцию", style="Muted.TLabel").grid(row=7, column=2, columnspan=2, sticky="w", padx=6)
+        ttk.Label(settings, text="Папка MTP runtime").grid(row=8, column=0, sticky="w", padx=6)
+        ttk.Entry(settings, textvariable=self.mtp_var).grid(row=8, column=1, columnspan=2, sticky="ew", padx=6, pady=4)
+        ttk.Button(settings, text="Обзор…", command=self._browse_mtp).grid(row=8, column=3, sticky="ew", padx=6)
+        ttk.Label(settings, text="Без MTP сервер работает; черновики по совпадениям с контекстом остаются доступны при Spec > 0. Контекст выше 262144 использует YaRN и требует дополнительной памяти; качество расширения здесь не измерялось.", style="Muted.TLabel", wraplength=760).grid(row=9, column=0, columnspan=4, sticky="w", padx=6, pady=8)
+        ttk.Checkbutton(settings, text="Открывать сервер без загрузки модели (lazy)", variable=self.lazy_var).grid(row=10, column=0, columnspan=4, sticky="w", padx=6, pady=4)
+        ttk.Label(settings, text="В этом режиме веб-интерфейс открывается сразу. Модель и vision загружаются при первом запросе; первый ответ будет дольше.", style="Muted.TLabel", wraplength=760).grid(row=11, column=0, columnspan=4, sticky="w", padx=6, pady=4)
 
         advanced = ttk.LabelFrame(advanced_page, text="Дополнительные аргументы движка (по одному на строку)", padding=8)
         advanced.grid(row=0, column=0, sticky="nsew", pady=4)
@@ -459,6 +590,52 @@ class StrataControl(tk.Tk):
             wraplength=800,
         ).grid(row=5, column=0, sticky="w", pady=(6, 0))
 
+    def _build_catalog(self, page) -> None:
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(1, weight=1)
+        ttk.Label(page, text="Семейство и квантование — два отдельных выбора", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        columns = ("family", "quant", "ram", "disk", "status")
+        tree = ttk.Treeview(page, columns=columns, show="headings", height=7)
+        tree.grid(row=1, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(page, orient="vertical", command=tree.yview)
+        scroll.grid(row=1, column=1, sticky="ns")
+        tree.configure(yscrollcommand=scroll.set)
+        for name, label, width in zip(columns, ("Семейство", "Квантовка", "RAM, ГБ ≈", "GGUF, ГБ ≈", "Поддержка"), (260, 115, 90, 100, 120)):
+            tree.heading(name, text=label)
+            tree.column(name, width=width, minwidth=60)
+        for row in catalog_rows():
+            tree.insert("", "end", values=row)
+        detail = ttk.Label(page, text="Ориентиры штатного setup, не гарантия запуска. RAM и VRAM не складываются в один общий лимит; большой GPU помогает в режиме low-RAM.", style="Muted.TLabel", wraplength=790)
+        detail.grid(row=2, column=0, columnspan=2, sticky="w", pady=12)
+        def selected(_event):
+            rows = tree.selection()
+            if rows:
+                title, quant, *_ = tree.item(rows[0], "values")
+                from strata_model_catalog import catalog, DESCRIPTIONS
+                _, families = catalog()
+                family = next((key for key, item in families.items() if item["title"] == title), "qwen")
+                detail.configure(text=DESCRIPTIONS[family])
+        tree.bind("<<TreeviewSelect>>", selected)
+        ttk.Label(page, text="UD-Q6_K_XL и OrcaRouter IQ3_XXS описаны в документации как ручные workflows; их автоматическая подготовка здесь не включена.", style="Muted.TLabel", wraplength=790).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Button(page, text="Открыть документацию моделей", command=lambda: os.startfile(str(ROOT / "docs" / "MODELS.md"))).grid(row=4, column=0, sticky="w")
+
+    def _browse_mtp(self) -> None:
+        selected = filedialog.askdirectory(parent=self, title="Папка MTP runtime (с experts.bin)")
+        if selected:
+            self.mtp_var.set(selected)
+            self.mtp_enabled_var.set(True)
+
+    def _apply_memory_preset(self) -> None:
+        # An explicit user action; existing profiles are never changed on load.
+        total = psutil.virtual_memory().total / GIB if psutil else 32
+        self.ram_reserve_var.set(f"{min(8, total / 4):g}")
+        self.vram_reserve_var.set("2")
+        self.expert_cache_var.set("auto")
+        self.context_var.set("32768")
+        self.kv_var.set("int8")
+        self.kv_resident_var.set("0")
+        self.status_var.set("Выбран профиль с запасом памяти. Сохраните настройки перед запуском.")
+
     @staticmethod
     def _theme_editor(editor) -> None:
         editor.configure(background=THEME["input"], foreground=THEME["text"], insertbackground=THEME["accent"], selectbackground=THEME["button"], selectforeground=THEME["text"], font=("Cascadia Mono", 10), relief="flat", highlightthickness=1, highlightbackground=THEME["border"], highlightcolor=THEME["accent"], padx=12, pady=10)
@@ -475,7 +652,7 @@ class StrataControl(tk.Tk):
             row=row, column=col + 1, sticky="ew", padx=6, pady=4
         )
 
-    def _load_config_list(self) -> None:
+    def _load_config_list(self, selected: Path | None = None) -> None:
         paths = _configs()
         self.display_to_path.clear()
         for path in paths:
@@ -488,10 +665,17 @@ class StrataControl(tk.Tk):
         labels = list(self.display_to_path)
         self.model_combo.configure(values=labels)
         if labels:
-            self.model_var.set(labels[0])
-            self._load_config(self.display_to_path[labels[0]])
+            if selected is None:
+                try:
+                    selected = ROOT / json.loads(CONTROL_STATE.read_text(encoding="utf-8"))["profile"]
+                except (OSError, ValueError, KeyError):
+                    pass
+            label = next((label for label, path in self.display_to_path.items() if path == selected), labels[0])
+            self.model_var.set(label)
+            self._load_config(self.display_to_path[label])
+            self.save_button.configure(state="normal")
         else:
-            self.status_var.set("Конфигурация не найдена — сначала установите модель через START-HERE.bat")
+            self.status_var.set("Добавьте скачанную модель кнопкой «+ Добавить модель»")
             for widget in (self.start_button, self.stop_button, self.restart_button, self.save_button):
                 widget.configure(state="disabled")
 
@@ -506,10 +690,29 @@ class StrataControl(tk.Tk):
             args = [str(arg) for arg in data.get("args", [])]
             self.config_path = path
             self.config_data = data
+            self.model_path_label.configure(text=_option_value(args, "--native", "Путь к модели не указан"))
+            details = describe_file(_option_value(args, "--native"))
+            if details:
+                mode = "RAM-кэш с бюджетом" if _option_value(args, "--resident-budget-gib") else "Resident / low-RAM" if _has_flag(args, "--resident-experts") else "Стандартный режим"
+                info = f"{details['title']} · {details['quant']} · {mode}"
+                if "arena_gb" in details:
+                    info += f" · эксперты ≈ {details['arena_gb'] / 1.073741824:.1f} ГиБ"
+                if details.get("experimental") or not details.get("menu"):
+                    info += " · экспериментальная / ручная настройка"
+                self.model_info_var.set(info)
+            else:
+                self.model_info_var.set("Пользовательский профиль — совместимость определяет движок Strata")
+            try:
+                CONTROL_STATE.write_text(json.dumps({"profile": path.name}), encoding="utf-8")
+            except OSError:
+                pass
             self.context_var.set(_option_value(args, "--max-context", "32768"))
             self.kv_var.set(_option_value(args, "--kv", "int8"))
             self.kv_resident_var.set(_option_value(args, "--kv-resident", "0"))
             self.spec_var.set(_option_value(args, "--spec", "4"))
+            self.mtp_var.set(_option_value(args, "--mtp") or data.get("launcher_mtp", ""))
+            self.mtp_enabled_var.set(bool(_option_value(args, "--mtp")))
+            self.lazy_var.set(bool(data.get("lazy_load", False)))
             self.spec_min_p_var.set(_option_value(args, "--spec-min-p", "0.5"))
             self.expert_cache_var.set(_option_value(args, "--expert-cache", "auto"))
             self.resident_var.set(_has_flag(args, "--resident-experts") or bool(_option_value(args, "--resident-budget-gib")))
@@ -520,7 +723,7 @@ class StrataControl(tk.Tk):
             vision = data.get("vision") if isinstance(data.get("vision"), dict) else {}
             self.vision_var.set(bool(vision))
             self.vision_device_var.set("GPU" if vision.get("gpu", True) else "CPU")
-            self.mmproj_var.set(str(vision.get("mmproj", "")))
+            self.mmproj_var.set(str(vision.get("mmproj") or data.get("launcher_mmproj", "")))
             self.vision_tokens_var.set(str(vision.get("max_tokens", 1024)))
             self.extra_args.delete("1.0", "end")
             self.extra_args.insert("1.0", "\n".join(_without_options(args, MANAGED_OPTIONS)))
@@ -537,6 +740,91 @@ class StrataControl(tk.Tk):
             self.address_label.configure(text=_web_url(int(data.get('port', 8080))))
         except (OSError, ValueError, TypeError) as exc:
             messagebox.showerror("Не удалось прочитать конфигурацию", str(exc), parent=self)
+
+    def _add_model(self) -> None:
+        if self._prepare_process is not None:
+            self._prepare_window.lift()
+            return
+        if any(_server_processes(path) for path in _configs()):
+            messagebox.showinfo("Добавить модель", "Остановите текущий сервер перед подготовкой другой модели, чтобы освободить память.", parent=self)
+            return
+        selected = filedialog.askopenfilename(parent=self, title="Выберите модель GGUF (первую часть 00001)",
+                                              filetypes=[("Модель GGUF", "*.gguf")])
+        if not selected:
+            return
+        source = first_shard(selected)
+        details = describe_file(source.name)
+        if not details:
+            messagebox.showerror("Модель не распознана", "Strata специализируется на Qwen3.8 Flash Next. Произвольные GGUF не поддерживаются. Список доступен на вкладке «Какие модели выбрать».", parent=self)
+            return
+        if not details.get("menu"):
+            manual_doc = "UNSLOTH_Q6.md" if details["quant"] == "UD-Q6_K_XL" else "ORCA.md"
+            messagebox.showinfo("Нужна ручная подготовка", details["description"] + f"\n\nИнструкция: docs/{manual_doc}\nПодготовленный strata-*.json можно разместить в папке Strata; он появится в списке после открытия приложения.", parent=self)
+            return
+        if not source.is_file():
+            messagebox.showerror("Не найдена первая часть", f"Для подготовки нужен файл:\n{source}", parent=self)
+            return
+        key = hashlib.sha256(_normalized(source).encode()).hexdigest()[:16]
+        destination = ROOT / f"strata-local-{key}.json"
+        if destination.exists():
+            self._load_config_list(destination)
+            return
+        note = f"{details['title']} · {details['quant']}\n{details['description']}\n\nОриентир setup: {details['ram_gb']} ГБ RAM. GGUF ≈ {details['download_gb']:g} ГБ; файлы уже должны быть скачаны."
+        if not messagebox.askokcancel("Подготовить модель", f"{note}\n\nВсе части GGUF должны лежать рядом. Подготовка локальная; для обычного Resident-режима может потребоваться 20–80 ГБ дополнительного места. Unsloth читает экспертов из GGUF без такой копии.\n\nНачать подготовку?", parent=self):
+            return
+        log_path = ROOT / ".strata-control-prepare.log"
+        command = [str(PYTHON), str(Path(__file__).resolve()), "--prepare-model", str(source), "--destination", str(destination)]
+        if self.config_path:
+            command += ["--template", str(self.config_path)]
+        try:
+            with log_path.open("wb") as log:
+                self._prepare_process = subprocess.Popen(command, cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    env={**os.environ, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"})
+        except OSError as exc:
+            messagebox.showerror("Подготовка модели", str(exc), parent=self)
+            return
+        window = self._prepare_window = tk.Toplevel(self)
+        window.title("Добавление модели")
+        window.geometry("800x450")
+        window.configure(background=THEME["background"])
+        ttk.Label(window, text="Подготавливаем локальную модель", font=("Segoe UI", 16, "bold")).pack(anchor="w", padx=20, pady=16)
+        output = tk.Text(window, wrap="word")
+        self._theme_editor(output)
+        output.pack(fill="both", expand=True, padx=20)
+        progress = ttk.Progressbar(window, mode="indeterminate")
+        progress.pack(fill="x", padx=20, pady=12)
+        progress.start()
+        window.protocol("WM_DELETE_WINDOW", lambda: messagebox.showinfo("Подготовка", "Дождитесь окончания подготовки. Она не запускает сервер.", parent=window))
+        self._busy = True
+        self.add_model_button.configure(state="disabled")
+        def poll():
+            try:
+                content = log_path.read_text(encoding="utf-8", errors="replace")[-20000:]
+            except OSError:
+                content = "Ожидание журнала…"
+            output.configure(state="normal")
+            output.delete("1.0", "end")
+            output.insert("1.0", content)
+            output.see("end")
+            output.configure(state="disabled")
+            code = self._prepare_process.poll()
+            if code is None:
+                self.after(1000, poll)
+                return
+            self._prepare_process = None
+            self._busy = False
+            self.add_model_button.configure(state="normal")
+            progress.stop()
+            progress.destroy()
+            window.protocol("WM_DELETE_WINDOW", window.destroy)
+            ttk.Button(window, text="Готово" if code == 0 else "Закрыть", command=window.destroy).pack(pady=12)
+            if code == 0 and destination.exists():
+                self._load_config_list(destination)
+                self.status_var.set("Модель добавлена — нажмите «Запустить»")
+            else:
+                self.status_var.set("Не удалось добавить модель — причина в окне подготовки")
+        self.after(500, poll)
 
     def _browse_mmproj(self) -> None:
         selected = filedialog.askopenfilename(
@@ -590,13 +878,13 @@ class StrataControl(tk.Tk):
     def _updated_config(self) -> dict:
         if self.config_path is None:
             raise ValueError("Сначала выберите конфигурацию модели.")
-        context = self._int_value(self.context_var.get(), "Контекст", 1024, 262144)
+        context = self._int_value(self.context_var.get(), "Контекст", 1024, 524288)
         if context % 1024:
             raise ValueError("Контекст должен делиться на 1024.")
         kv_resident = self._int_value(self.kv_resident_var.get(), "KV в VRAM", 0, context)
         if kv_resident % 1024:
             raise ValueError("KV в VRAM должен делиться на 1024.")
-        spec = self._int_value(self.spec_var.get(), "Spec decoding", 1, 16)
+        spec = self._int_value(self.spec_var.get(), "Spec decoding", 0, 16)
         port = self._int_value(self.port_var.get(), "Порт", 1, 65535)
         try:
             spec_min_p = float(self.spec_min_p_var.get().strip())
@@ -623,6 +911,16 @@ class StrataControl(tk.Tk):
             raise ValueError("После резерва RAM для Strata должно оставаться хотя бы 1 ГБ.")
 
         args = list(extras)
+        mtp_enabled = self.mtp_enabled_var.get() if hasattr(self, "mtp_enabled_var") else bool(_option_value(self.config_data.get("args", []), "--mtp"))
+        mtp = self.mtp_var.get().strip() if hasattr(self, "mtp_var") else _option_value(self.config_data.get("args", []), "--mtp")
+        if mtp_enabled:
+            if not (Path(mtp) / "experts.bin").is_file():
+                raise ValueError("MTP: выберите подготовленную папку runtime с experts.bin или выключите MTP. Сервер умеет работать без него.")
+            args += ["--mtp", mtp]
+        if context > 262144 or self.config_data.get("launcher_context_auto_rope"):
+            args = _without_options(args, {"--rope-scaling", "--rope-scale"})
+            if context > 262144:
+                args += ["--rope-scaling", "yarn", "--rope-scale", f"{context / 262144:g}"]
         for option, value in (
             ("--max-context", str(context)), ("--kv", kv), ("--spec", str(spec)),
             ("--spec-min-p", str(spec_min_p)), ("--expert-cache", expert_cache),
@@ -634,7 +932,14 @@ class StrataControl(tk.Tk):
         old_reserve = self.config_data.get("launcher_memory", {}).get("ram_reserve_gib", 0)
         old_budget = _option_value(self.config_data.get("args", []), "--resident-budget-gib")
         if ram_reserve_gib:
-            args.extend(("--resident-budget-gib", f"{total_ram_gib - ram_reserve_gib:.6f}"))
+            budget = total_ram_gib - ram_reserve_gib
+            details = describe_file(_option_value(extras, "--native"))
+            if details and details.get("budget"):
+                # setup reserves 24 GiB beside Unsloth's resident experts.
+                cell_bytes = {"int8": 1056, "k8v4": 816, "q4_0": 576}[kv]
+                kv_gb = context * 13 * cell_bytes / 1e9 if kv_resident else 0
+                budget = min(budget, max(8, round(total_ram_gib) - 24 - math.ceil(kv_gb)), int(details["arena_gb"] / 1.073741824))
+            args.extend(("--resident-budget-gib", f"{budget:.6f}"))
             launcher_env["STRATA_RESIDENT_HEADROOM_GIB"] = f"{ram_reserve_gib:g}"
         elif old_budget and not old_reserve:
             args.extend(("--resident-budget-gib", old_budget))
@@ -645,6 +950,19 @@ class StrataControl(tk.Tk):
                             if name.upper() != "STRATA_RESIDENT_HEADROOM_GIB"}
 
         data = dict(self.config_data)
+        if mtp:
+            data["launcher_mtp"] = mtp
+        if hasattr(self, "mmproj_var") and self.mmproj_var.get().strip():
+            data["launcher_mmproj"] = self.mmproj_var.get().strip()
+        if hasattr(self, "lazy_var"):
+            if self.lazy_var.get():
+                data["lazy_load"] = True
+            else:
+                data.pop("lazy_load", None)
+        if context > 262144:
+            data["launcher_context_auto_rope"] = True
+        elif data.get("launcher_context_auto_rope"):
+            data.pop("launcher_context_auto_rope", None)
         if self.vision_var.get():
             mmproj = Path(self.mmproj_var.get().strip())
             if not mmproj.is_file():
@@ -656,6 +974,11 @@ class StrataControl(tk.Tk):
                 native_model = str(old_vision.get("model", ""))
             if not native_model:
                 raise ValueError("В дополнительных аргументах не найден --native с путём к основной модели.")
+            details = describe_file(native_model)
+            if details and details.get("mmproj"):
+                canonical = {"mmproj-Qwen3.8-Flash-Next-BF16.gguf", "mmproj-Swift-Qwen3.8-Flash-Next-BF16.gguf"}
+                if mmproj.name in canonical and mmproj.name != details.get("mmproj"):
+                    raise ValueError(f"Этот mmproj относится к другому семейству. Для {details['title']} нужен {details.get('mmproj')}.")
             vision_gpu = self.vision_device_var.get() == "GPU"
             vision_config = {
                 "exe": str(old_vision.get("exe") or ROOT / "engine" / "strata-vision.exe"),
@@ -705,9 +1028,20 @@ class StrataControl(tk.Tk):
             return 8080
 
     def _refresh_status(self) -> None:
+        if self._started_process is not None and self._started_process.poll() is not None:
+            code = self._started_process.returncode
+            self._started_process = None
+            if self._pending_browser_port is not None:
+                self._pending_browser_port = None
+                try:
+                    detail = LOG_PATH.read_text(encoding="utf-8", errors="replace")[-5000:]
+                except OSError:
+                    detail = "Журнал недоступен."
+                messagebox.showerror("Сервер не запустился", f"Strata завершилась с кодом {code}.\n\n{detail}", parent=self)
         if psutil is not None:
             memory = psutil.virtual_memory()
-            self.memory_summary.configure(text=f"RAM сейчас: свободно {memory.available / GIB:.1f} из {memory.total / GIB:.1f} ГБ")
+            protection = "защита RAM выключена" if self.ram_reserve_var.get() in ("", "0", "0.0") else f"запас RAM: {self.ram_reserve_var.get()} ГБ"
+            self.memory_summary.configure(text=f"RAM: свободно {memory.available / GIB:.1f} из {memory.total / GIB:.1f} ГБ · {protection}")
         if self.config_path is None:
             self.after(2000, self._refresh_status)
             return
@@ -726,9 +1060,9 @@ class StrataControl(tk.Tk):
             port = _port_in_command(proc, port)
             break
         health = _health(port)
-        if health and health.get("service") == "strata" and health.get("loaded"):
+        if health and health.get("service") == "strata" and (health.get("loaded") or self.config_data.get("lazy_load")):
             if matches:
-                text, color = "●  Работает", THEME["accent"]
+                text, color = ("●  Работает" if health.get("loaded") else "●  API готов · модель загрузится при запросе"), THEME["accent"]
             else:
                 text, color = "●  Strata работает на этом порту", THEME["accent"]
             self.web_button.configure(state="normal")
@@ -775,6 +1109,29 @@ class StrataControl(tk.Tk):
         if not PYTHON.exists() or not SERVER.exists():
             messagebox.showerror("Не найден Strata", "Не найдены .venv или serve/server.py в папке Strata.", parent=self)
             return
+        details = describe_file(_option_value(data.get("args", []), "--native"))
+        build_path = ROOT / "engine" / "BUILD.json"
+        if details and build_path.is_file():
+            try:
+                build = json.loads(build_path.read_text(encoding="utf-8-sig"))
+                backend = build.get("backend", "cuda" if build.get("cuda") else "")
+                if details.get("nvidia_only") and backend not in ("cuda", ""):
+                    messagebox.showerror("Модель и движок не совместимы", f"{details['quant']} в штатном setup поддерживается только на NVIDIA. Текущий backend: {backend}.", parent=self)
+                    return
+                version = tuple(int(part) for part in build.get("version", "0").split(".") if part.isdigit())
+                minimum = details.get("engine", (0, 1, 32) if details.get("budget") else (0,))
+                if version < minimum:
+                    messagebox.showerror("Нужен более новый движок", f"Для {details['quant']} нужен Strata {'.'.join(map(str, minimum))} или новее. Установлен {build.get('version')}. Обновите установку Strata.", parent=self)
+                    return
+            except (OSError, ValueError, TypeError):
+                pass
+        for label, value in (("Движок Strata", data.get("exe", "")),
+                             ("Модель GGUF", _option_value(data.get("args", []), "--native")),
+                             ("Папка подготовленной модели", _option_value(data.get("args", []), "--pack")),
+                             ("Токенизатор", data.get("tokenizer", ""))):
+            if not value or not Path(value).exists():
+                messagebox.showerror("Не найден файл модели", f"{label}:\n{value or 'Путь не указан'}\n\nПроверьте доступность диска. Если модель перенесена, добавьте её кнопкой «+ Добавить модель».", parent=self)
+                return
         ram_reserve = float(data.get("launcher_memory", {}).get("ram_reserve_gib", 0))
         if ram_reserve and psutil.virtual_memory().available / GIB <= ram_reserve + 0.25:
             messagebox.showerror("Недостаточно свободной RAM", f"Для запуска нужна свободная RAM больше резерва {ram_reserve:g} ГБ. Закройте другие программы или уменьшите резерв.", parent=self)
@@ -795,6 +1152,7 @@ class StrataControl(tk.Tk):
                     cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                     creationflags=flags, close_fds=True, env=process_env,
                 )
+                self._started_process = server_proc
                 if ram_reserve:
                     try:
                         created = psutil.Process(server_proc.pid).create_time()
@@ -817,6 +1175,7 @@ class StrataControl(tk.Tk):
             messagebox.showerror("Не удалось запустить Strata", str(exc), parent=self)
 
     def _stop_server(self, quiet: bool = False) -> bool:
+        self._pending_browser_port = None
         if self.config_path is None:
             return False
         if psutil is None:
@@ -891,7 +1250,18 @@ class StrataControl(tk.Tk):
 
 
 if __name__ == "__main__":
-    if "--memory-guard" in sys.argv:
+    if "--prepare-model" in sys.argv:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--prepare-model", type=Path, required=True)
+        parser.add_argument("--destination", type=Path, required=True)
+        parser.add_argument("--template", type=Path)
+        options = parser.parse_args()
+        try:
+            _prepare_local_model(options.prepare_model, options.template, options.destination)
+        except Exception as exc:
+            print(f"Не удалось подготовить модель: {exc}", flush=True)
+            raise SystemExit(1)
+    elif "--memory-guard" in sys.argv:
         parser = argparse.ArgumentParser()
         parser.add_argument("--memory-guard", action="store_true")
         parser.add_argument("--pid", type=int, required=True)
@@ -901,4 +1271,16 @@ if __name__ == "__main__":
         options = parser.parse_args()
         _memory_guard(options.pid, options.created, options.ram_reserve_gib, options.state)
     else:
-        StrataControl().mainloop()
+        try:
+            StrataControl().mainloop()
+        except Exception:
+            import traceback
+            detail = traceback.format_exc()
+            try:
+                (ROOT / ".strata-control-startup.log").write_text(detail, encoding="utf-8")
+            except OSError:
+                pass
+            error_window = tk.Tk()
+            error_window.withdraw()
+            messagebox.showerror("Не удалось открыть Strata Control", "Причина ошибки сохранена в .strata-control-startup.log\n\n" + detail[-2500:], parent=error_window)
+            error_window.destroy()

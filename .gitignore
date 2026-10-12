@@ -2,3 +2,9 @@
 __pycache__/
 *.pyc
 *.log
+
+/.strata-control-*.json
+/.strata-control-install.txt
+/.venv/
+/engine/
+/strata-*.json
