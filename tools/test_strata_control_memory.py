@@ -83,10 +83,13 @@ class MemoryGuardTests(unittest.TestCase):
         self.assertEqual(control._web_url(8080), "http://localhost:8080/")
 
     def test_open_web_uses_port_of_running_profile(self):
-        app = SimpleNamespace(config_path=Path("profile.json"), _selected_port=lambda: 8081)
-        with patch.object(control, "_server_processes", return_value=[Mock()]), patch.object(control, "_port_in_command", return_value=8080), patch.object(control, "_health", return_value={"service": "strata"}), patch.object(control.webbrowser, "open") as opened:
+        app = SimpleNamespace(config_path=Path("profile.json"),
+                              _status_cached={"path": "profile.json", "port": 8080,
+                                              "health": {"service": "strata"}})
+        with patch.object(control.threading, "Thread") as worker:
             control.StrataControl._open_web(app)
-            opened.assert_called_once_with("http://localhost:8080/")
+            self.assertEqual(worker.call_args.kwargs["args"], ("http://localhost:8080/",))
+            worker.return_value.start.assert_called_once()
 
     def test_sustained_pressure_stops_only_target_and_records_reason(self):
         proc = Mock()
