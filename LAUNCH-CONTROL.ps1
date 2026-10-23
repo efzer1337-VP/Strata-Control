@@ -4,7 +4,8 @@ Add-Type -AssemblyName System.Windows.Forms
 function Find-ControlRoot([string]$Path) {
     $candidates = @($Path, (Join-Path $Path 'Strata'), (Join-Path $Path '.strata-full\Strata'))
     foreach ($candidate in $candidates) {
-        if ((Test-Path -LiteralPath (Join-Path $candidate 'strata_control.py')) -and
+        if ((Test-Path -LiteralPath (Join-Path $candidate 'strata_control_web.py')) -and
+            (Test-Path -LiteralPath (Join-Path $candidate 'serve\control\index.html')) -and
             (Test-Path -LiteralPath (Join-Path $candidate '.venv\Scripts\python.exe'))) {
             return [System.IO.Path]::GetFullPath($candidate)
         }
@@ -37,7 +38,7 @@ try {
         [System.IO.File]::WriteAllText($savedInstall, $root)
     }
     $python = Join-Path $root '.venv\Scripts\python.exe'
-    $script = Join-Path $root 'strata_control.py'
+    $script = Join-Path $root 'strata_control_web.py'
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $python
     $startInfo.Arguments = '"' + $script + '"'

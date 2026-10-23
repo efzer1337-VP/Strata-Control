@@ -509,9 +509,6 @@ class StrataControl(tk.Tk):
         self.poly_threads_var = tk.StringVar(value="16")
         self.poly_kv_var = tk.StringVar(value="fp16")
         self.poly_vision_gpu_var = tk.BooleanVar(value=False)
-        self.chat_messages = []
-        self.chat_generation = 0
-        self.chat_image: Path | None = None
 
     def _build_ui(self) -> None:
         self._apply_theme()
@@ -571,7 +568,7 @@ class StrataControl(tk.Tk):
         advanced_page = ttk.Frame(notebook, padding=(4, 10))
         memory_page = ttk.Frame(notebook, padding=(4, 14))
         notebook.add(memory_page, text="Ресурсы ПК")
-        self._build_chat_page(notebook)
+        self._build_monitor_page(notebook)
         notebook.add(settings_page, text="Strata · параметры")
         self._build_external_page(notebook)
         self._build_poly_page(notebook)
@@ -636,7 +633,7 @@ class StrataControl(tk.Tk):
 
         ttk.Label(settings, text="Контекст (токены)").grid(row=0, column=0, sticky="w", padx=6)
         ttk.Combobox(settings, textvariable=self.context_var, values=(8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288), width=14).grid(row=0, column=1, sticky="ew", padx=6, pady=4)
-        self._combo(settings, 0, 2, "KV cache", self.kv_var, ("int8", "q4_0", "k8v4"))
+        self._combo(settings, 0, 2, "KV cache", self.kv_var, ("fp16", "int8", "q4_0", "k8v4"))
         self._entry(settings, 1, 0, "KV в VRAM (токены; 0 — выкл.)", self.kv_resident_var)
         self._entry(settings, 1, 2, "Порт", self.port_var)
         self._entry(settings, 2, 0, "Spec decoding (токены)", self.spec_var)
@@ -806,125 +803,18 @@ class StrataControl(tk.Tk):
             actions.columnconfigure(index, weight=1)
         self._engine_choices()
 
-    def _build_chat_page(self, notebook) -> None:
-        page = ttk.Frame(notebook, padding=12)
-        notebook.add(page, text="Чат и API")
+    def _build_monitor_page(self, notebook) -> None:
+        page = ttk.Frame(notebook, padding=16)
+        notebook.add(page, text="Сервер и ресурсы")
         page.columnconfigure(0, weight=1)
-        page.rowconfigure(2, weight=1)
-        self.chat_stats = tk.StringVar(value="Запустите сервер, затем отправьте сообщение")
-        ttk.Label(page, textvariable=self.chat_stats, foreground=THEME["accent"],
-                  font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
-        self.chat_resources = tk.StringVar(value="RAM / VRAM / GPU: проверяем…")
-        ttk.Label(page, textvariable=self.chat_resources, style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 10))
-        self.chat_output = tk.Text(page, wrap="word", state="disabled", height=15)
-        self._theme_editor(self.chat_output)
-        self.chat_output.grid(row=2, column=0, sticky="nsew")
-        box = ttk.Frame(page)
-        box.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        box.columnconfigure(0, weight=1)
-        self.chat_input = tk.Text(box, wrap="word", height=3)
-        self._theme_editor(self.chat_input)
-        self.chat_input.grid(row=0, column=0, columnspan=3, sticky="ew")
-        self.chat_input.bind("<Control-Return>", lambda _event: self._send_chat() or "break")
-        self.chat_image_label = ttk.Label(box, text="Изображение не выбрано", style="Muted.TLabel")
-        self.chat_image_label.grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Button(box, text="Прикрепить изображение", command=self._attach_chat_image).grid(row=1, column=1, padx=6)
-        self.chat_send = ttk.Button(box, text="Отправить · Ctrl+Enter", style="Primary.TButton", command=self._send_chat)
-        self.chat_send.grid(row=1, column=2)
-        ttk.Button(box, text="Новый чат", command=self._clear_chat).grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Label(page, text="Чат работает внутри Strata Control через локальный API. Скорость и число токенов показываются после ответа.",
-                  style="Muted.TLabel", wraplength=730).grid(row=4, column=0, sticky="w", pady=(10, 0))
-
-    def _attach_chat_image(self) -> None:
-        selected = filedialog.askopenfilename(parent=self, title="Изображение для модели",
-                                               filetypes=[("Изображения", "*.png *.jpg *.jpeg *.webp *.bmp"), ("Все файлы", "*.*")])
-        if selected:
-            self.chat_image = Path(selected)
-            self.chat_image_label.configure(text=self.chat_image.name)
-
-    def _append_chat(self, role: str, content: str) -> None:
-        self.chat_output.configure(state="normal")
-        self.chat_output.insert("end", f"{role}\n{content.strip()}\n\n")
-        self.chat_output.see("end")
-        self.chat_output.configure(state="disabled")
-
-    def _clear_chat(self) -> None:
-        self.chat_generation += 1
-        self.chat_messages = []
-        self.chat_send.configure(state="normal")
-        self.chat_output.configure(state="normal")
-        self.chat_output.delete("1.0", "end")
-        self.chat_output.configure(state="disabled")
-        self.chat_stats.set("Новый чат · контекст беседы очищен")
-
-    def _send_chat(self) -> None:
-        import base64
-        import mimetypes
-        prompt = self.chat_input.get("1.0", "end").strip()
-        if not prompt and not self.chat_image:
-            return
-        if not self.config_path or not _health(self._selected_port()):
-            self.chat_stats.set("Сначала запустите выбранный сервер")
-            return
-        content = prompt
-        if self.chat_image:
-            if self.chat_image.stat().st_size > 20 * 1024 * 1024:
-                self.chat_stats.set("Изображение больше 20 МБ")
-                return
-            mime = mimetypes.guess_type(self.chat_image.name)[0] or "image/png"
-            encoded = base64.b64encode(self.chat_image.read_bytes()).decode("ascii")
-            content = [{"type": "text", "text": prompt or "Опиши изображение."},
-                       {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}]
-        self.chat_messages.append({"role": "user", "content": content})
-        self._append_chat("Вы" + (f" · {self.chat_image.name}" if self.chat_image else ""), prompt or "Опиши изображение.")
-        attached_image = self.chat_image
-        self.chat_image = None
-        self.chat_image_label.configure(text="Изображение не выбрано")
-        self.chat_input.delete("1.0", "end")
-        self.chat_send.configure(state="disabled")
-        self.chat_stats.set("Модель отвечает…")
-        port = self._selected_port()
-        model = self.config_data.get("model_name", "default")
-        messages = list(self.chat_messages)
-        generation = self.chat_generation
-        def work():
-            started = time.monotonic()
-            try:
-                body = json.dumps({"model": model, "messages": messages,
-                                   "max_tokens": 2048, "reasoning_budget_tokens": 512}).encode("utf-8")
-                request = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions", body,
-                                                 {"Content-Type": "application/json"})
-                with urllib.request.urlopen(request, timeout=300) as response:
-                    result = json.load(response)
-                message = result["choices"][0]["message"]
-                answer = message.get("content") or ""
-                if not answer and message.get("reasoning_content"):
-                    answer = "Ответ ещё не завершён. Размышление:\n" + message["reasoning_content"]
-                elapsed = max(time.monotonic() - started, 0.001)
-                usage = result.get("usage", {})
-                tokens = usage.get("completion_tokens", 0)
-                prompt_tokens = usage.get("prompt_tokens", 0)
-                self.after(0, lambda: finish(answer, tokens, prompt_tokens, elapsed, None))
-            except Exception as exc:
-                self.after(0, lambda error=str(exc): finish("", 0, 0, 0, error))
-        def finish(answer, tokens, prompt_tokens, elapsed, error):
-            if generation != self.chat_generation:
-                return
-            self.chat_send.configure(state="normal")
-            if error:
-                if self.chat_messages and self.chat_messages[-1].get("role") == "user":
-                    self.chat_messages.pop()
-                self.chat_input.insert("1.0", prompt)
-                if attached_image:
-                    self.chat_image = attached_image
-                    self.chat_image_label.configure(text=attached_image.name)
-                self.chat_stats.set("Ошибка ответа: " + error)
-                return
-            self.chat_messages.append({"role": "assistant", "content": answer})
-            self._append_chat("Модель", answer)
-            self.chat_stats.set(f"Ответ за {elapsed:.1f} с · вход {prompt_tokens} · выход {tokens} · {tokens / elapsed:.1f} ток/с" if tokens else
-                                f"Ответ за {elapsed:.1f} с · вход {prompt_tokens}")
-        threading.Thread(target=work, daemon=True).start()
+        self.server_resources = tk.StringVar(value="Проверяем RAM, VRAM и загрузку процессора…")
+        ttk.Label(page, text="Ресурсы компьютера", style="Heading.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(page, textvariable=self.server_resources, wraplength=700).grid(row=1, column=0, sticky="w", pady=16)
+        ttk.Label(page, text="Адрес API и журнал доступны в панели сервера. Для управления откройте Strata Control.",
+                  style="Muted.TLabel", wraplength=700).grid(row=2, column=0, sticky="w")
+        ttk.Button(page, text="Открыть панель управления", command=lambda: subprocess.Popen(
+            [str(PYTHON), str(ROOT / "strata_control_web.py")], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )).grid(row=3, column=0, sticky="w", pady=12)
 
     def _build_poly_page(self, notebook) -> None:
         outer = self.poly_page = ttk.Frame(notebook, padding=8)
@@ -1406,11 +1296,6 @@ class StrataControl(tk.Tk):
         try:
             if self.config_path != path:
                 self._pending_browser_port = None
-                self.chat_generation += 1
-                self.chat_messages = []
-                self.chat_output.configure(state="normal")
-                self.chat_output.delete("1.0", "end")
-                self.chat_output.configure(state="disabled")
             data = json.loads(path.read_text(encoding="utf-8-sig"))
             choices = self._engine_choices()
             key = data.get("launcher_engine", "strata")
@@ -1640,8 +1525,8 @@ class StrataControl(tk.Tk):
         if expert_cache != "auto":
             self._int_value(expert_cache, "Expert cache", 1, 4096)
         kv = self.kv_var.get().strip()
-        if kv not in ("int8", "q4_0", "k8v4"):
-            raise ValueError("KV cache: выберите int8, q4_0 или k8v4.")
+        if kv not in ("fp16", "int8", "q4_0", "k8v4"):
+            raise ValueError("KV cache: выберите fp16, int8, q4_0 или k8v4.")
         extras = self._read_extra_args()
         launcher_env = self._read_environment()
         vram_reserve_gib = _reserve_gib(self.vram_reserve_var.get(), "Резерв VRAM", _gpu_total_gib(int(self.config_data.get("gpu", 0))))
@@ -1680,7 +1565,7 @@ class StrataControl(tk.Tk):
             details = describe_file(_option_value(extras, "--native"))
             if details and details.get("budget"):
                 # setup reserves 24 GiB beside Unsloth's resident experts.
-                cell_bytes = {"int8": 1056, "k8v4": 816, "q4_0": 576}[kv]
+                cell_bytes = {"fp16": 2048, "int8": 1056, "k8v4": 816, "q4_0": 576}[kv]
                 kv_gb = context * 13 * cell_bytes / 1e9 if kv_resident else 0
                 budget = min(budget, max(8, round(total_ram_gib) - 24 - math.ceil(kv_gb)), int(details["arena_gb"] / 1.073741824))
             args.extend(("--resident-budget-gib", f"{budget:.6f}"))
@@ -1893,7 +1778,7 @@ class StrataControl(tk.Tk):
         gpu_text = (f"VRAM {gpu_memory[0] / 1024:.1f}/{gpu_memory[1] / 1024:.1f} ГБ · GPU {gpu_memory[2]:.0f}% · "
                     f"{gpu_memory[3]:.0f} °C · {gpu_memory[4]:.0f} Вт") if gpu_memory else "VRAM / GPU —"
         cpu = snapshot.get("cpu_percent")
-        self.chat_resources.set(ram_text + " · " + gpu_text + (f" · CPU {cpu:.0f}%" if cpu is not None else ""))
+        self.server_resources.set(ram_text + " · " + gpu_text + (f" · CPU {cpu:.0f}%" if cpu is not None else ""))
         if self.config_path is None:
             return
         if psutil is None:
@@ -2175,7 +2060,8 @@ if __name__ == "__main__":
         _memory_guard(options.pid, options.created, options.ram_reserve_gib, options.state)
     else:
         try:
-            StrataControl().mainloop()
+            from strata_control_web import main
+            main()
         except Exception:
             import traceback
             detail = traceback.format_exc()

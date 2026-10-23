@@ -21,6 +21,8 @@ import urllib.request
 import uuid
 import zipfile
 
+import strata_control_settings as control_settings
+
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / ".strata-control"
 REGISTRY = STATE / "engines.json"
@@ -333,21 +335,21 @@ def poly_runtime_config(config: dict) -> dict:
         raise ValueError("Выберите существующий GGUF для PolyStrata.")
     args = list(base["args"])
     args = _poly_arg(args, "--model", str(model))
-    args = _poly_arg(args, "--max-context", str(_integer(settings.get("context", 32768), "Контекст", 16384, 1048576)))
+    args = _poly_arg(args, "--max-context", str(_integer(settings.get("context", 32768), "Контекст", 16, 1048576)))
     args = _poly_arg(args, "--conversation-cache-mib", str(_integer(settings.get("cache_ram_mib", 0), "Кэш бесед", 0, 65536)))
     reserve = float(settings.get("vram_reserve_gib", 2))
     if not math.isfinite(reserve) or not 0 <= reserve <= 64:
         raise ValueError("Запас VRAM должен быть от 0 до 64 ГБ.")
     args = _poly_arg(args, "--vram-reserve-mib", str(round(reserve * 1024)))
     if "poly_threads" in settings:
-        args = _poly_arg(args, "--threads", str(_integer(settings["poly_threads"], "Потоки CPU", 1, 256)))
+        args = _poly_arg(args, "--threads", str(_integer(settings["poly_threads"], "Потоки CPU", 0, 256)))
     if "poly_kv" in settings:
         kv = str(settings["poly_kv"])
         if kv not in {"fp16", "q8_0"}:
             raise ValueError("PolyStrata KV: выберите fp16 или q8_0.")
         args = _poly_arg(args, "--kv", kv)
     if "poly_window" in settings:
-        args = _poly_arg(args, "--window", str(_integer(settings["poly_window"], "Окно MTP", 1, 16)))
+        args = _poly_arg(args, "--window", str(_integer(settings["poly_window"], "Окно MTP", 0, 8)))
     vision_path = str(settings.get("mmproj", "")).strip()
     if vision_path:
         mmproj = Path(vision_path).expanduser().resolve()
@@ -374,18 +376,9 @@ def poly_runtime_config(config: dict) -> dict:
     base["model_name"] = str(config.get("model_name") or model.stem)
     base["display_name"] = str(config.get("launcher_profile_name") or model.stem)
     base["log"] = str(STATE / "polystrata-engine.log")
-    try:
-        temperature = float(settings.get("temperature", 1.0))
-        top_p = float(settings.get("top_p", 0.95))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Температура и Top P должны быть числами.") from exc
-    if not math.isfinite(temperature) or temperature < 0 or not math.isfinite(top_p) or not 0 < top_p <= 1:
-        raise ValueError("Температура должна быть >= 0, Top P — от 0 до 1.")
-    base["sampling"] = {"temperature": temperature, "top_p": top_p,
-                        "top_k": _integer(settings.get("top_k", 20), "Top K", 0, 1000)}
     base["port"] = _integer(config.get("port", 8081), "Порт", 1, 65535)
     base["host"] = "127.0.0.1"
-    return base
+    return control_settings.apply_poly_runtime(config, base)
 
 
 def command_for(config: dict, materialize: bool = False) -> list[str]:

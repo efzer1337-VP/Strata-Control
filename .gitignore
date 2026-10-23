@@ -10,3 +10,6 @@ __pycache__/
 /strata-*.json
 /.strata-control/
 /Strata-data/
+/dist/
+/.pytest_cache/
+/strata-*.json.*

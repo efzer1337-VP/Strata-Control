@@ -1,6 +1,20 @@
 {
   "commit": "7695859aa13afb248bdb4d36f9b2e95707db079d",
-  "packaged_at": "2026-10-22",
+  "packaged_at": "2026-10-23",
   "repository": "https://github.com/Niko1221/Strata",
-  "tracked_source_files": 2976
+  "tracked_source_files": 2976,
+  "control_version": "4.3",
+  "windows_nvidia_release": {
+    "engine_version": "0.1.48",
+    "release": "v0.2.3.1",
+    "url": "https://github.com/Niko1221/Strata/releases/tag/v0.2.3.1",
+    "asset": "strata-engine-0.1.48-windows-x86_64-cuda-cuda13.tar.gz",
+    "sha256": "1e1611b0977d984bd7d8e79591a1ba1a7e550a2f4a66bfa45744a77308a71b95"
+  },
+  "source_patches": [
+    {
+      "file": "setup.py",
+      "purpose": "Accept vision_archs as a semicolon-separated string as well as a list; applied by tools/build_release_bundle.py"
+    }
+  ]
 }
