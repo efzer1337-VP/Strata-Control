@@ -257,6 +257,33 @@ class ControlTests(unittest.TestCase):
             stop.assert_not_called()
             start.assert_not_called()
 
+    def test_clear_memory_never_stops_servers(self):
+        self.profile('strata', 'first')
+        c = web.Controller()
+        with patch.object(web.memory_cleanup, 'clear_system_cache') as clear, \
+             patch.object(c, 'stop') as stop, patch.object(web.control, '_terminate_tree') as terminate:
+            result = c.clear_memory(lambda message: None)
+        clear.assert_called_once_with()
+        stop.assert_not_called()
+        terminate.assert_not_called()
+        self.assertTrue(result['ram_cache_cleared'])
+        self.assertFalse(result['vram_cleared'])
+
+    def test_clear_memory_reports_error_and_releases_lock(self):
+        c = web.Controller()
+        with patch.object(web.memory_cleanup, 'clear_system_cache', side_effect=RuntimeError('cancelled')):
+            with self.assertRaisesRegex(RuntimeError, 'cancelled'):
+                c.clear_memory(lambda message: None)
+        self.assertFalse(c.memory_cleanup_lock.locked())
+
+    def test_clear_memory_rejects_duplicate_but_ignores_model_operation_lock(self):
+        c = web.Controller()
+        with c.operation_lock, patch.object(web.memory_cleanup, 'clear_system_cache'):
+            c.clear_memory(lambda message: None)
+        with c.memory_cleanup_lock:
+            with self.assertRaisesRegex(ValueError, 'уже выполняется'):
+                c.clear_memory(lambda message: None)
+
     def test_unknown_profile_and_engine_do_not_change_selection(self):
         first, _ = self.profile('llama.cpp', 'llama')
         c = web.Controller()
@@ -297,6 +324,19 @@ class HTTPTests(unittest.TestCase):
             with urllib.request.urlopen(self.url + asset) as response:
                 self.assertEqual(response.status, 200)
                 self.assertIn("frame-ancestors 'none'", response.headers['Content-Security-Policy'])
+
+    def test_clear_memory_endpoint_without_selected_profile(self):
+        c = self.server.controller
+        c.selected = ''
+        with patch.object(web.memory_cleanup, 'clear_system_cache'):
+            response = self.request('/api/clear-memory', {})
+            for _ in range(100):
+                task = next(task for task in c.tasks if task['id'] == response['task_id'])
+                if task['status'] not in {'queued', 'running'}: break
+                time.sleep(.01)
+        self.assertEqual(task['status'], 'done')
+        self.assertFalse(task['serialized'])
+        self.assertTrue(task['result']['ram_cache_cleared'])
 
     def test_http_selection_copy_export_import(self):
         self.request('/api/select', {'id': self.ident})
@@ -391,6 +431,11 @@ HTTPServer((a.host,a.port),H).serve_forever()
                     ready()
                     self.assertEqual(json.loads(path.read_text())['engine_settings']['context'],65536)
                     self.assertIn('CPU lifecycle fixture ready', web.log_tail())
+                    with patch.object(web.memory_cleanup, 'clear_system_cache'):
+                        cleared = c.clear_memory(lambda message: None)
+                    self.assertTrue(cleared['ram_cache_cleared'])
+                    self.assertTrue(c.collect_status()['ready'])
+                    self.assertTrue(web.control.psutil.pid_exists(restarted['pid']))
                     c.stop(ident)
                     self.assertFalse(c.collect_status()['running'])
                     self.assertIsNone(web.control._health(port))
@@ -403,6 +448,9 @@ def serve_fixture():
     """Serve temporary GPU-free profiles for browser regression checks."""
     fixture = ControlTests()
     fixture.setUp()
+    cleanup = patch.object(web.memory_cleanup, 'clear_system_cache')
+    cleanup.start()
+    fixture.addCleanup(cleanup.stop)
     fixture.profile('strata', 'Strata fixture')
     fixture.profile('polystrata', 'Poly fixture', poly_window=8, poly_kv='fp16')
     fixture.profile('llama.cpp', 'llama fixture', extra_args=['--load-mode', 'none'])

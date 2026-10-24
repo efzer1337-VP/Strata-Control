@@ -24,6 +24,9 @@ CONTROL_FILES = (
     'tools/test_strata_control_ui.cjs',
     'tools/test_strata_control_release.py',
     'tools/build_release_bundle.py',
+    'tools/INSTALL-LOCAL.bat', 'INSTAL.bat', 'INSTALL-PYTHON.ps1', 'control_install.py',
+    'strata_memory_cleanup.py', 'tools/test_control_install.py',
+    'tools/test_strata_memory_cleanup.py',
 )
 
 
@@ -34,10 +37,11 @@ def sha256(path):
 
 def private_entry(name):
     parts = PurePosixPath(name).parts
-    if any(part in {'.venv', '.strata-control', 'Strata-data', '__pycache__', '.git'} for part in parts):
+    if any(part in {'.venv', '.python', '.strata-control', 'Strata-data', '__pycache__', '.git'} for part in parts):
         return True
     leaf = parts[-1] if parts else ''
-    return (leaf.endswith(('.pyc', '.log', '.bak')) or
+    return (leaf in {'.python-installer.exe', '.strata-install-settings.json'} or
+            leaf.endswith(('.pyc', '.log', '.bak')) or
             (leaf.startswith('strata-') and '.json' in leaf and len(parts) == 2))
 
 
@@ -68,6 +72,7 @@ def setup_compat(source):
 
 def build(base, output, engine=None):
     replacements = {f'Strata/{name}': ROOT / name for name in CONTROL_FILES}
+    replacements['Strata/INSTALL.bat'] = ROOT / 'tools' / 'INSTALL-LOCAL.bat'
     replacements['Strata/.gitignore'] = ROOT / 'tools' / 'strata.gitignore'
     replacements.update({name: ROOT / name for name in ('README.md', 'UPSTREAM.json')})
     if engine:
@@ -77,6 +82,11 @@ def build(base, output, engine=None):
             raise FileNotFoundError(f'Missing source for {name}: {path}')
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix('.tmp')
+    wrappers = {
+        'INSTALL.bat': '@echo off\r\ncall "%~dp0Strata\\INSTALL.bat" %*\r\nexit /b %errorlevel%\r\n',
+        'INSTAL.bat': '@echo off\r\ncall "%~dp0INSTALL.bat" %*\r\nexit /b %errorlevel%\r\n',
+        'START-CONTROL.bat': '@echo off\r\nif not exist "%~dp0Strata\\.venv\\Scripts\\python.exe" goto install\r\ncall "%~dp0Strata\\STRATA-CONTROL.bat" %*\r\nexit /b\r\n:install\r\ncall "%~dp0INSTALL.bat" %*\r\n',
+    }
     seen = set()
     with zipfile.ZipFile(base) as old, zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED,
                                                     compresslevel=6, allowZip64=True, strict_timestamps=False) as new:
@@ -88,7 +98,9 @@ def build(base, output, engine=None):
             if private_entry(name) or name.startswith('Strata/engine/'):
                 continue
             seen.add(name)
-            if name == 'Strata/setup.py':
+            if name in wrappers:
+                new.writestr(entry, wrappers[name])
+            elif name == 'Strata/setup.py':
                 new.writestr(entry, setup_compat(old.read(entry)))
             elif name in replacements:
                 new.write(replacements[name], name)
@@ -98,6 +110,9 @@ def build(base, output, engine=None):
         for name, path in replacements.items():
             if name not in seen:
                 new.write(path, name)
+        for name, content in wrappers.items():
+            if name not in seen:
+                new.writestr(name, content)
     temporary.replace(output)
     required = set(replacements) | {'Strata/setup.py', 'Strata/serve/server.py', 'INSTALL.bat', 'START-CONTROL.bat'}
     with zipfile.ZipFile(output) as package:
@@ -121,7 +136,7 @@ def build(base, output, engine=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base', type=Path, default=DOWNLOADS / 'Strata-Control-Full-20261012-v2.zip')
-    parser.add_argument('--output', type=Path, default=DOWNLOADS / 'Strata-Control-Full-20261023-v4.3.zip')
+    parser.add_argument('--output', type=Path, default=DOWNLOADS / 'Strata-Control-Full-20261024-v4.3-install.zip')
     parser.add_argument('--engine-dir', type=Path)
     args = parser.parse_args()
     build(args.base, args.output, args.engine_dir)

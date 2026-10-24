@@ -67,4 +67,6 @@ build-vision-cuda12.bat
 /.strata-control-install.txt
 /.strata-control/
 /Strata-data/
-/strata-*.json.*
+/.python/
+/.python-installer.exe
+/.strata-install-settings.json

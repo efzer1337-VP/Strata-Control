@@ -1,9 +1,13 @@
 $ErrorActionPreference = 'Stop'
-$taskArchive = Join-Path $PSScriptRoot 'downloads\Strata-Control-Full-20261023-v4.3.zip'
+$taskArchive = Join-Path $PSScriptRoot 'downloads\Strata-Control-Full-20261024-v4.3-install.zip'
 $taskDestination = Join-Path $PSScriptRoot '.strata-full'
 $taskMarker = Join-Path $taskDestination '.package-sha256'
 if (-not [IO.File]::Exists($taskArchive)) { throw 'Full package is missing. Download the complete repository or the full release ZIP.' }
-$taskHash = (Get-FileHash -LiteralPath $taskArchive -Algorithm SHA256).Hash
+$taskHasher = [Security.Cryptography.SHA256]::Create()
+$taskStream = [IO.File]::OpenRead($taskArchive)
+try {
+    $taskHash = [BitConverter]::ToString($taskHasher.ComputeHash($taskStream)).Replace('-', '')
+} finally { $taskStream.Dispose(); $taskHasher.Dispose() }
 if ([IO.File]::Exists($taskMarker) -and [IO.File]::ReadAllText($taskMarker).Trim() -eq $taskHash) { return }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [IO.Directory]::CreateDirectory($taskDestination) | Out-Null

@@ -257,6 +257,7 @@
     const other = (state?.active_servers || []).some(server => server.id !== profileId);
     $('start').disabled = !online || !profileId || switching || operating || other || status.running || status.checking || previewPending || Boolean(validationErrors.length);
     $('stop').disabled = !online || !profileId || operating || !status.running;
+    $('clear-memory').disabled = !online || (state?.tasks || []).some(task => task.action === 'Очистка RAM + VRAM' && ['running','queued'].includes(task.status));
     $('restart').disabled = !online || !profileId || operating || other || !status.running || previewPending || Boolean(validationErrors.length);
     $('web').disabled = !online || !status.ready;
     $('monitor').disabled = !online || !status.ready || !['strata','polystrata'].includes(selectedEngine);
@@ -308,7 +309,7 @@
     const taskStamp = JSON.stringify(state.tasks || []);
     if ($('tasks').dataset.stamp !== taskStamp) {
       const labels = { queued: 'В очереди', running: 'Выполняется', done: 'Готово', error: 'Ошибка' };
-      const tasks = (state.tasks || []).slice(-6).reverse().map(task => node('div', (task.action || 'Операция') + ': ' + labels[task.status] + '. ' + (task.error || (task.status === 'done' ? '' : task.message)), 'task-item' + (task.status === 'error' ? ' error' : '')));
+      const tasks = (state.tasks || []).slice(-6).reverse().map(task => node('div', (task.action || 'Операция') + ': ' + labels[task.status] + '. ' + (task.error || (task.status === 'done' ? (task.result?.message || '') : task.message)), 'task-item' + (task.status === 'error' ? ' error' : '')));
       $('tasks').replaceChildren(...(tasks.length ? tasks : [node('p', 'Операций пока нет', 'help')]));
       $('tasks').dataset.stamp = taskStamp;
     }
@@ -442,6 +443,11 @@
   bindForm('register-form', async () => {
     await api('register', { name: $('engine-name').value, exe: $('engine-exe').value });
     $('engine-dialog').close(); await refresh(true); notify('Движок подключён.');
+  });
+  bindBusy('clear-memory', async () => {
+    await api('clear-memory', {});
+    notify('Очистка памяти запрошена. Результат появится в операциях Control.');
+    await refresh();
   });
   for (const action of ['start','restart','stop']) bindBusy(action, async () => {
     if (action !== 'stop' && dirty && !await saveCurrent()) return;

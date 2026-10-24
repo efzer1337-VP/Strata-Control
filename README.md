@@ -1,5 +1,25 @@
 # Strata Control 4.3
 
+**[Скачать актуальный репозиторий с установщиком](https://github.com/efzer1337-VP/Strata-Control/archive/refs/heads/main.zip)**
+
+Распакуйте всю папку в любое доступное для записи место и запустите `INSTALL.bat` или `INSTAL.bat`. Выберите Strata, PolyStrata или оба движка. Скачивание модели необязательно: Enter в меню модели означает «пропустить». Python, зависимости и движок устанавливаются отдельно от весов, после чего открывается Control. Модель установщик не запускает.
+
+Все файлы остаются внутри папки репозитория: окружение и исходники в `.strata-full/Strata/`, данные в `.strata-full/Strata/Strata-data/`. Если подходящего Python нет, он устанавливается там же в `.python/`. Для последующих запусков используйте `START-CONTROL.bat`; чтобы скачать модель позднее, повторно запустите `INSTALL.bat`.
+
+Для PolyStrata предлагаются обычная Ornith и [Ornith 1.5 Uncensored](https://huggingface.co/dealignai/Ornith-1.5-35B-A3B-UNCENSORED-GGUF): Q4_K_M (21,7 ГБ) и Q3_K_M (17,2 ГБ). Веса скачиваются с Hugging Face с проверкой размера и SHA-256; исходники PolyStrata скачиваются с GitHub. Зрение выбирается отдельно.
+
+```bat
+INSTALL.bat --yes --no-model
+INSTALL.bat --engine polystrata --yes --no-model
+INSTALL.bat --engine polystrata --model-choice uncensored
+```
+
+Обновлённый [полный пакет с установщиком](downloads/Strata-Control-Full-20261024-v4.3-install.zip) ([SHA-256](downloads/Strata-Control-Full-20261024-v4.3-install.zip.sha256)) уже включён в репозиторий. В нём нет весов и личных профилей. Нужны интернет и совместимый GPU с драйвером. Без модели также скачиваются Python, зависимости и компоненты выбранного движка. Оценки памяти для Uncensored в setup являются оценками, а не замерами на всех видеокартах.
+
+## Предыдущий готовый пакет NVIDIA 4.3.0
+
+Этот пакет сохранён как предыдущая версия; новый установщик находится по ссылке выше.
+
 Панель для выбора движка и модели, настройки профилей, управления сервером и наблюдения за ресурсами ПК.
 
 **[Скачать Windows/NVIDIA с движком Strata 0.1.48](https://github.com/efzer1337-VP/Strata-Control/releases/download/v4.3.0/Strata-Control-4.3.0-Windows-NVIDIA-CUDA13.zip)** · [SHA-256](https://github.com/efzer1337-VP/Strata-Control/releases/download/v4.3.0/Strata-Control-4.3.0-Windows-NVIDIA-CUDA13.zip.sha256) · [Релиз](https://github.com/efzer1337-VP/Strata-Control/releases/tag/v4.3.0)

@@ -25,6 +25,7 @@ import traceback
 import strata_control as control
 import strata_control_engines as engines
 import strata_control_settings as control_settings
+import strata_memory_cleanup as memory_cleanup
 from strata_control_presets import presets
 
 ROOT = Path(__file__).resolve().parent
@@ -357,6 +358,7 @@ class Controller:
     def __init__(self):
         self.lock = threading.RLock()
         self.operation_lock = threading.Lock()
+        self.memory_cleanup_lock = threading.Lock()
         self.tasks = []
         self.profiles = {}
         self.profile_errors = []
@@ -649,6 +651,22 @@ class Controller:
         if errors: raise ValueError('\n'.join(errors))
         self.stop(ident)
         return self.start(ident, values)
+    def clear_memory(self, progress):
+        if not self.memory_cleanup_lock.acquire(blocking=False):
+            raise ValueError('Очистка памяти уже выполняется.')
+        try:
+            before = control.psutil.virtual_memory().available if control.psutil else None
+            progress('Очищаем системный файловый кэш RAM. Подтвердите права администратора в окне Windows.')
+            memory_cleanup.clear_system_cache()
+            after = control.psutil.virtual_memory().available if control.psutil else None
+            message = ('Файловый кэш RAM очищен. Программы продолжают работать. '
+                       'VRAM: общесистемная очистка без участия приложений недоступна.')
+            if before is not None and after is not None:
+                message += f' Доступно RAM: {before / control.GIB:.2f} → {after / control.GIB:.2f} ГиБ (весь ПК).'
+            return {'ram_cache_cleared': True, 'vram_cleared': False,
+                    'ram_available_before': before, 'ram_available_after': after, 'message': message}
+        finally:
+            self.memory_cleanup_lock.release()
     def prepare(self, source, progress, name=''):
         if self.active_servers(): raise ValueError('Остановите работающий сервер перед подготовкой модели.')
         source = Path(source).resolve()
@@ -736,6 +754,7 @@ class Handler(BaseHTTPRequestHandler):
                 path,data = c.profile(ident); result = {'config':updated(path,data,values)}
             elif route == '/api/start': result = c.task('Запуск сервера',lambda p:c.start(ident,values),serialize=True)
             elif route == '/api/stop': result = c.task('Остановка сервера',lambda p:c.stop(ident),serialize=True)
+            elif route == '/api/clear-memory': result = c.task('Очистка RAM + VRAM',c.clear_memory)
             elif route == '/api/restart': result = c.task('Перезапуск сервера',lambda p:c.restart(ident,values),serialize=True)
             elif route == '/api/install': result = c.task('Установка движка',lambda p:{'engine':engines.install_llama(body.get('variant','cuda'),p)})
             elif route == '/api/register':

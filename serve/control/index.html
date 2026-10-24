@@ -46,6 +46,7 @@
     </div>
   </main>
   <aside class="rail" aria-label="Мониторинг">
+    <div class="memory-cleanup"><button id="clear-memory" aria-describedby="clear-memory-help" disabled>Очистить RAM + VRAM</button><p id="clear-memory-help" class="help">Очистка файлового кэша RAM всего ПК без остановки программ. Windows может запросить права администратора. Повторное чтение файлов может замедлиться. Общая очистка VRAM недоступна: её освобождают сами приложения.</p></div>
     <section class="hardware"><h2>Ресурсы компьютера</h2><p id="gpu-name" class="help">Проверяем оборудование</p>
       <div class="metric"><div class="metric-label"><span>VRAM</span><span id="vram-value">Недоступно</span></div><div class="meter"><span id="vram-bar"></span></div></div>
       <div class="metric"><div class="metric-label"><span>RAM</span><span id="ram-value">Недоступно</span></div><div class="meter"><span id="ram-bar"></span></div></div>

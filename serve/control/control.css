@@ -104,6 +104,9 @@ pre { margin: 0; font: 12px/1.7 Consolas, monospace; white-space: pre-wrap; over
 .rail { padding: 24px 18px; border-left: 1px solid var(--border); background: #e4e9d9; min-width: 0; }
 .rail section + section { border-top: 1px solid var(--border); margin-top: 24px; padding-top: 20px; }
 .rail h2 { font-size: 14px; }
+.memory-cleanup { margin-bottom: 24px; }
+.memory-cleanup button { width: 100%; }
+@media (min-width: 501px) and (max-width: 800px) { .memory-cleanup { grid-column: 1 / -1; margin-bottom: 0; } }
 .metric { margin: 18px 0; }
 .metric-label { display: flex; flex-wrap: wrap; justify-content: space-between; font-size: 12px; gap: 4px; }
 .metric-label span:last-child { font-variant-numeric: tabular-nums; }
