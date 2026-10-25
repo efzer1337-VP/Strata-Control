@@ -244,7 +244,7 @@
     renderFields(data.fields || []);
     showValidation(data.validation_errors || []);
     $('empty-profile').hidden = Boolean(profileId);
-    for (const id of ['profile-name','profile-description','save-as','export','save','preset-32k','preset-64k']) $(id).disabled = !profileId;
+    for (const id of ['profile-name','profile-description','save-as','export','delete-profile','save','preset-32k','preset-64k']) $(id).disabled = !profileId;
     renderSelectors();
   }
   const numeric = value => typeof value === 'number' && Number.isFinite(value);
@@ -491,6 +491,22 @@
     const url = URL.createObjectURL(new Blob([JSON.stringify(result.config, null, 2)], { type: 'application/json' }));
     const link = node('a'); link.href = url; link.download = ($('profile-name').value || 'strata-profile').replace(/[\\/:*?"<>|]/g, '_') + '.json';
     link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  let deleteProfileId = '';
+  $('delete-profile').onclick = async () => {
+    if (!profileId || !await mayLeave()) return;
+    deleteProfileId = profileId;
+    $('delete-profile-name').textContent = state?.profiles?.find(profile => profile.id === deleteProfileId)?.name || 'Без имени';
+    $('delete-dialog-message').hidden = true;
+    $('delete-dialog').showModal();
+    $('confirm-delete-profile').focus();
+  };
+  bindBusy('confirm-delete-profile', async () => {
+    await api('delete-profile', { profile_id: deleteProfileId });
+    dirty = false; profileId = null; deleteProfileId = '';
+    $('delete-dialog').close();
+    await refresh(true);
+    notify('Профиль удалён. Файлы модели сохранены.');
   });
   document.querySelectorAll('[data-close]').forEach(button => { button.onclick = () => button.closest('dialog').close(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(true); });

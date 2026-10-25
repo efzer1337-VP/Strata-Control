@@ -136,7 +136,7 @@ def build(base, output, engine=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base', type=Path, default=DOWNLOADS / 'Strata-Control-Full-20261012-v2.zip')
-    parser.add_argument('--output', type=Path, default=DOWNLOADS / 'Strata-Control-Full-20261024-v4.3-install.zip')
+    parser.add_argument('--output', type=Path, default=DOWNLOADS / 'Strata-Control-Full-20261025-v4.3.1-install.zip')
     parser.add_argument('--engine-dir', type=Path)
     args = parser.parse_args()
     build(args.base, args.output, args.engine_dir)

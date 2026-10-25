@@ -1,4 +1,4 @@
-# Strata Control 4.3
+# Strata Control 4.3.1
 
 **[Скачать актуальный репозиторий с установщиком](https://github.com/efzer1337-VP/Strata-Control/archive/refs/heads/main.zip)**
 
@@ -14,7 +14,9 @@ INSTALL.bat --engine polystrata --yes --no-model
 INSTALL.bat --engine polystrata --model-choice uncensored
 ```
 
-Обновлённый [полный пакет с установщиком](downloads/Strata-Control-Full-20261024-v4.3-install.zip) ([SHA-256](downloads/Strata-Control-Full-20261024-v4.3-install.zip.sha256)) уже включён в репозиторий. В нём нет весов и личных профилей. Нужны интернет и совместимый GPU с драйвером. Без модели также скачиваются Python, зависимости и компоненты выбранного движка. Оценки памяти для Uncensored в setup являются оценками, а не замерами на всех видеокартах.
+Control позволяет удалить выбранный профиль. Перед удалением нужно подтверждение; работающий профиль защищён. Удаляется его JSON, файлы модели остаются.
+
+Обновлённый [полный пакет с установщиком](downloads/Strata-Control-Full-20261025-v4.3.1-install.zip) ([SHA-256](downloads/Strata-Control-Full-20261025-v4.3.1-install.zip.sha256)) уже включён в репозиторий. В нём нет весов и личных профилей. Нужны интернет и совместимый GPU с драйвером. Без модели также скачиваются Python, зависимости и компоненты выбранного движка. Оценки памяти для Uncensored в setup являются оценками, а не замерами на всех видеокартах.
 
 ## Предыдущий готовый пакет NVIDIA 4.3.0
 

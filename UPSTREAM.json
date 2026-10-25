@@ -1,6 +1,6 @@
 {
   "commit": "7695859aa13afb248bdb4d36f9b2e95707db079d",
-  "packaged_at": "2026-10-24",
+  "packaged_at": "2026-10-25",
   "repository": "https://github.com/Niko1221/Strata",
   "tracked_source_files": 2976,
   "control_version": "4.3",
@@ -18,6 +18,7 @@
     }
   ],
   "installer": {
+    "profile_deletion": true,
     "local_paths": true,
     "model_download_default": "skip",
     "polystrata_revision": "e97c8aa47ca2c01025accdd32d07a01536d794ce",

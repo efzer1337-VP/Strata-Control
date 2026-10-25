@@ -410,6 +410,32 @@ class Controller:
             self.selected_engine = data.get('launcher_engine', 'strata')
             self.engine_profiles[self.selected_engine] = ident
             self.persist_selection()
+    def delete_profile(self, ident):
+        if not self.operation_lock.acquire(blocking=False):
+            raise ValueError('Дождитесь завершения текущей операции Control.')
+        try:
+            path, data = self.profile(ident)
+            if path.is_symlink(): raise ValueError('Нельзя удалять профиль по символической ссылке.')
+            resolved = path.resolve()
+            profile_dir = control.PROFILES_DIR.resolve()
+            root = ROOT.resolve()
+            if not ((profile_dir.is_relative_to(root) and resolved.parent == profile_dir) or
+                    (resolved.parent == root and resolved.name.startswith('strata-') and resolved.suffix == '.json')):
+                raise ValueError('Можно удалять только файлы профилей Control.')
+            if control._server_processes(path, force=True):
+                raise ValueError('Остановите сервер этого профиля перед удалением.')
+            with self.lock:
+                if ident not in self.profiles or self.profiles[ident][0].resolve() != resolved:
+                    raise ValueError('Профиль уже удалён или изменился. Обновите список.')
+                path.unlink()
+                engine = data.get('launcher_engine', 'strata')
+                if self.engine_profiles.get(engine) == ident:
+                    self.engine_profiles.pop(engine, None)
+            self.reload()
+            self.persist_selection()
+            return {'deleted': True, 'profile_id': ident}
+        finally:
+            self.operation_lock.release()
     def persist_selection(self):
         try: stored = json.loads(control.CONTROL_STATE.read_text(encoding='utf-8-sig'))
         except (OSError,ValueError): stored = {}
@@ -745,6 +771,7 @@ class Handler(BaseHTTPRequestHandler):
             if route in {'/api/start','/api/stop','/api/restart'}:
                 ident = str(c.profile(ident)[0].resolve())
             if route == '/api/select': c.select(body['id']); result = {'selected':True}
+            elif route == '/api/delete-profile': result = c.delete_profile(body['profile_id'])
             elif route == '/api/select-engine': c.select_engine(body['engine']); result = {'selected':True}
             elif route == '/api/preview':
                 path,data = c.profile(ident); candidate = updated(path,data,values)
